@@ -6,10 +6,12 @@ from multiprocessing import Pool
 
 
 class Website:
-    def __init__(self, name, port, url=None):
+    def __init__(self, name, port, path, url=None, python_env=None):
         self.name = name
         self.port = port
         self.url = url
+        self.path = path
+        self.python_env = python_env
         self.response = None
         self.status_code = None
         self.reason = None
@@ -17,6 +19,7 @@ class Website:
         self.BadExcept = None
 
     def print(self):
+        print('\n')
         try:
             print("name:", self.name, end=" ")
         except KeyError:
@@ -49,7 +52,6 @@ class Website:
             print("BadExcept:", self.BadExcept, end=" ")
         except (KeyError, AttributeError):
             pass
-        print("")
 
 def get_url(website):
     url = website.url
@@ -86,7 +88,9 @@ def ingest_data(file="websites.ini"):
         name = i
         port = config[i]["port"]
         url = config[i]["url"]
-        websites.append(Website(name=name, port=port, url=url))
+        path = config[i]["path"]
+        python_env = config[i]["python_env"]
+        websites.append(Website(name=name, port=port, url=url, path=path, python_env=python_env))
     return websites
 
 
@@ -94,31 +98,24 @@ def wrapMyFunc(index, website):
     return [index, check_online(website)]
 
 def update(results):
+    pbar.update(1)
     index = results[0]
     new_website = results[1]
-    # note: input comes from async `wrapMyFunc`
     processed_websites[index] = new_website  # put answer into correct index of result list
-    pbar.update()
-
+    new_website.print()
 
 print("Ingesting data")
 websites = ingest_data()
 # start processing the websites
 print("start processing the websites")
 processes = len(websites)
-pbar = tqdm.tqdm(total=len(websites))
 processed_websites = [None] * len(websites) # result list of correct size
 
+with tqdm.tqdm(total=len(websites)) as pbar:
+    with Pool(processes) as p:
+        for i in range(len(websites)):
+            p.apply_async(wrapMyFunc, args=(i, websites[i]), callback=update)
+        p.close()
+        p.join()
+        pbar.close()
 
-with Pool(processes) as p:
-    for i in range(len(websites)):
-        p.apply_async(wrapMyFunc, args=(i, websites[i]), callback=update)
-    p.close()
-    p.join()
-    pbar.close()
-
-
-
-for i in processed_websites:
-    boi = i
-    i.print()
