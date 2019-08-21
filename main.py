@@ -4,45 +4,52 @@ import threading
 import tqdm
 from multiprocessing import Pool
 
+
 class Website:
     def __init__(self, name, port, url=None):
         self.name = name
         self.port = port
         self.url = url
+        self.response = None
+        self.status_code = None
+        self.reason = None
+        self.elapsed = None
+        self.BadExcept = None
 
     def print(self):
         try:
-            print(self.name)
+            print("name:", self.name, end=" ")
         except KeyError:
             pass
         try:
-            print(self.port)
+            print("port:", self.port, end=" ")
         except KeyError:
             pass
         try:
-            print(self.url)
+            print("url:", self.url, end=" ")
         except KeyError:
             pass
         try:
-            print(self.response)
-        except KeyError:
+            print("response:", self.response, end=" ")
+        except (KeyError, AttributeError):
             pass
         try:
-            print(self.status_code)
-        except KeyError:
+            print("status_code:", self.status_code, end=" ")
+        except (KeyError, AttributeError):
             pass
         try:
-            print(self.reason)
-        except KeyError:
+            print("reason:", self.reason, end=" ")
+        except (KeyError, AttributeError):
             pass
         try:
-            print(self.elapsed)
-        except KeyError:
+            print("elapsed:", self.elapsed, end=" ")
+        except (KeyError, AttributeError):
             pass
         try:
-            print(self.RequestException)
-        except KeyError:
+            print("BadExcept:", self.BadExcept, end=" ")
+        except (KeyError, AttributeError):
             pass
+        print("")
 
 def get_url(website):
     url = website.url
@@ -64,13 +71,12 @@ def check_online(website):
         website.status_code = response.status_code
         website.reason = response.reason
         website.time = response.elapsed
-        website.RequestException = False
+        website.BadExcept = False
     except requests.exceptions.RequestException as e:  # This is the correct syntax
-        website.response = None
-        website.status_code = None
-        website.reason = None
-        website.time = None
-        website.RequestException = True
+        website.BadExcept = True
+        pass
+    return website
+
 
 def ingest_data(file="websites.ini"):
     config = configparser.ConfigParser()
@@ -84,37 +90,35 @@ def ingest_data(file="websites.ini"):
     return websites
 
 
-def run_item(f, item):
-    result_info = [threading.Event(), None]
+def wrapMyFunc(index, website):
+    return [index, check_online(website)]
 
-    def runit():
-        result_info[1] = f(item)
-        result_info[0].set()
-
-    threading.Thread(target=runit).start()
-    return result_info
-
-
-def gather_results(result_infos):
-    results = []
-    for i in range(len(result_infos)):
-        result_infos[i][0].wait()
-        results.append(result_infos[i][1])
-    return results
+def update(results):
+    index = results[0]
+    new_website = results[1]
+    # note: input comes from async `wrapMyFunc`
+    processed_websites[index] = new_website  # put answer into correct index of result list
+    pbar.update()
 
 
-# def process(website):
-processes = 8
 print("Ingesting data")
 websites = ingest_data()
 # start processing the websites
 print("start processing the websites")
+processes = len(websites)
+pbar = tqdm.tqdm(total=len(websites))
+processed_websites = [None] * len(websites) # result list of correct size
 
-pool = Pool(processes=processes)
-for _ in tqdm.tqdm(pool.imap_unordered(check_online, websites), total=len(websites)):
-    pass
+
+with Pool(processes) as p:
+    for i in range(len(websites)):
+        p.apply_async(wrapMyFunc, args=(i, websites[i]), callback=update)
+    p.close()
+    p.join()
+    pbar.close()
 
 
-for i in websites:
+
+for i in processed_websites:
     boi = i
     i.print()
