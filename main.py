@@ -1,121 +1,109 @@
-import requests
+import argparse
 import configparser
-import threading
-import tqdm
-from multiprocessing import Pool
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+
+import requests
 
 
 class Website:
-    def __init__(self, name, port, path, url=None, python_env=None):
+    def __init__(self, name, port=None, path=None, url=None, python_env=None):
         self.name = name
         self.port = port
         self.url = url
         self.path = path
         self.python_env = python_env
-        self.response = None
         self.status_code = None
         self.reason = None
         self.elapsed = None
-        self.BadExcept = None
+        self.error = None
 
-    def print(self):
-        print('\n')
-        try:
-            print("name:", self.name, end=" ")
-        except KeyError:
-            pass
-        try:
-            print("port:", self.port, end=" ")
-        except KeyError:
-            pass
-        try:
-            print("url:", self.url, end=" ")
-        except KeyError:
-            pass
-        try:
-            print("response:", self.response, end=" ")
-        except (KeyError, AttributeError):
-            pass
-        try:
-            print("status_code:", self.status_code, end=" ")
-        except (KeyError, AttributeError):
-            pass
-        try:
-            print("reason:", self.reason, end=" ")
-        except (KeyError, AttributeError):
-            pass
-        try:
-            print("elapsed:", self.elapsed, end=" ")
-        except (KeyError, AttributeError):
-            pass
-        try:
-            print("BadExcept:", self.BadExcept, end=" ")
-        except (KeyError, AttributeError):
-            pass
+    def as_dict(self):
+        return {
+            "name": self.name,
+            "url": get_url(self),
+            "status_code": self.status_code,
+            "reason": self.reason,
+            "elapsed_seconds": self.elapsed,
+            "error": self.error,
+        }
+
 
 def get_url(website):
-    url = website.url
-    port = website.port
-    if url is None and port is None:
-        website.print()
-        raise Exception('Website Missing Port and URL info in config')
-    if url is None:
-        return "http://localhost:" + port
-    else:
-        return url + ":" + port
+    if not website.url and not website.port:
+        raise ValueError("Website '{}' is missing both port and url".format(website.name))
+    if website.url and website.port:
+        return "{}:{}".format(website.url.rstrip("/"), website.port)
+    if website.url:
+        return website.url
+    return "http://localhost:{}".format(website.port)
 
 
-def check_online(website):
+def check_online(website, timeout=5):
     url = get_url(website)
     try:
-        response = requests.get(url)
-        website.response = response
+        response = requests.get(url, timeout=timeout)
         website.status_code = response.status_code
         website.reason = response.reason
-        website.time = response.elapsed
-        website.BadExcept = False
-    except requests.exceptions.RequestException as e:  # This is the correct syntax
-        website.BadExcept = True
-        pass
+        website.elapsed = response.elapsed.total_seconds()
+    except requests.exceptions.RequestException as error:
+        website.error = str(error)
     return website
 
 
 def ingest_data(file="websites.ini"):
     config = configparser.ConfigParser()
-    config.read(file)
+    read_files = config.read(file)
+    if not read_files:
+        raise FileNotFoundError("Config file not found: {}".format(file))
+
     websites = []
-    for i in config.sections():
-        name = i
-        port = config[i]["port"]
-        url = config[i]["url"]
-        path = config[i]["path"]
-        python_env = config[i]["python_env"]
-        websites.append(Website(name=name, port=port, url=url, path=path, python_env=python_env))
+    for section in config.sections():
+        websites.append(
+            Website(
+                name=section,
+                port=config[section].get("port") or None,
+                url=config[section].get("url") or None,
+                path=config[section].get("path") or None,
+                python_env=config[section].get("python_env") or None,
+            )
+        )
     return websites
 
 
-def wrapMyFunc(index, website):
-    return [index, check_online(website)]
+def check_all(websites, timeout=5, workers=4):
+    max_workers = max(1, min(workers, len(websites) or 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        return list(executor.map(lambda site: check_online(site, timeout=timeout), websites))
 
-def update(results):
-    pbar.update(1)
-    index = results[0]
-    new_website = results[1]
-    processed_websites[index] = new_website  # put answer into correct index of result list
-    new_website.print()
 
-print("Ingesting data")
-websites = ingest_data()
-# start processing the websites
-print("start processing the websites")
-processes = len(websites)
-processed_websites = [None] * len(websites) # result list of correct size
+def main():
+    parser = argparse.ArgumentParser(description="Check configured website uptime.")
+    parser.add_argument(
+        "--config",
+        default=os.environ.get("UPTIME_CONFIG", "websites.ini"),
+        help="Path to INI config. Defaults to UPTIME_CONFIG or websites.ini.",
+    )
+    parser.add_argument("--timeout", type=float, default=5, help="Request timeout in seconds")
+    parser.add_argument("--workers", type=int, default=4, help="Concurrent worker count")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    args = parser.parse_args()
 
-with tqdm.tqdm(total=len(websites)) as pbar:
-    with Pool(processes) as p:
-        for i in range(len(websites)):
-            p.apply_async(wrapMyFunc, args=(i, websites[i]), callback=update)
-        p.close()
-        p.join()
-        pbar.close()
+    websites = ingest_data(args.config)
+    results = check_all(websites, timeout=args.timeout, workers=args.workers)
 
+    if args.json:
+        print(json.dumps([site.as_dict() for site in results], indent=2))
+    else:
+        for site in results:
+            data = site.as_dict()
+            print(
+                "{name} {url} status={status_code} reason={reason} error={error}".format(
+                    **data
+                )
+            )
+
+
+if __name__ == "__main__":
+    main()
